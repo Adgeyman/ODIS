@@ -1,605 +1,564 @@
-{
-  "nbformat": 4,
-  "nbformat_minor": 0,
-  "metadata": {
-    "colab": {
-      "provenance": [],
-      "authorship_tag": "ABX9TyPXTYgcoH4Ei/gp0EFX5JZ8",
-      "include_colab_link"
-    },
-    "kernelspec": {
-      "name": "python3",
-      "display_name": "Python 3"
-    },
-    "language_info": {
-      "name": "python"
+import streamlit as st
+from collections import defaultdict
+
+class TablePlanner:
+    def __init__(self):
+        # Tables: {table_id: {'capacity': capacity, 'occupied': bool, 'room': room_name}}
+        self.tables = {}
+        # Current assignments: {table_id: [group_ids]}
+        self.assignments = defaultdict(list)
+        # Guest groups waiting to be seated: {group_id: {'size': size, 'name': name}}
+        self.groups = {}
+        # Seated groups: {group_id: {'size': size, 'name': name, 'table': table_id}}
+        self.seated_groups = {}
+        # Counter for group IDs
+        self.next_group_id = 1
+        # Combined tables tracking
+        self.combined_tables = {}
+        # Room definitions
+        self.rooms = {
+            "GREENROOM": ["T1A", "T1B", "T2", "T3A", "T3B"],
+            "RESTERAUNT": ["T4", "T5", "T6", "T7", "T8", "T9A", "T9B"],
+            "BOTTOM BAR": ["WINDOW", "BACK RIGHT", "LADS", "BLACKBOARD"],
+            "SMALL FUNCTION": ["SQUARE", "OVAL", "WOODEN"]
+        }
+
+    def add_table(self, table_id, capacity, room):
+        """Add a new table to the pub"""
+        self.tables[table_id] = {'capacity': capacity, 'occupied': False, 'combined': False, 'room': room}
+
+    def remove_table(self, table_id):
+        """Remove a table from the pub"""
+        if table_id in self.tables:
+            del self.tables[table_id]
+            if table_id in self.assignments:
+                # Move any assigned groups back to waiting
+                for group_id in self.assignments[table_id]:
+                    if group_id in self.seated_groups:
+                        # Move seated group back to waiting
+                        group_data = self.seated_groups[group_id]
+                        self.groups[group_id] = {'size': group_data['size'], 'name': group_data['name']}
+                        del self.seated_groups[group_id]
+                del self.assignments[table_id]
+
+    def add_guests(self, group_size, group_name=None):
+        """Add a new group of guests"""
+        group_id = self.next_group_id
+        self.next_group_id += 1
+        
+        # If no name provided, use the ID
+        if not group_name:
+            group_name = f"Group {group_id}"
+            
+        self.groups[group_id] = {'size': group_size, 'name': group_name}
+        return group_id
+
+    def seat_guests(self, group_id, table_id):
+        """Seat a specific group at a specific table"""
+        if table_id not in self.tables:
+            return False, "Table does not exist"
+
+        if group_id not in self.groups:
+            return False, "Group does not exist"
+
+        group_size = self.groups[group_id]['size']
+        group_name = self.groups[group_id]['name']
+        table_info = self.tables[table_id]
+
+        # Check if table is part of a combined table
+        if table_info.get('combined', False) and '+' in table_id:
+            # This is a combined table, use its capacity
+            table_capacity = table_info['capacity']
+        else:
+            # Regular table
+            table_capacity = table_info['capacity']
+
+        if group_size > table_capacity:
+            return False, "Group too large for table"
+
+        # Check if table is already occupied
+        if self.tables[table_id]['occupied']:
+            # Check if there's enough remaining capacity
+            current_occupancy = sum(
+                self.seated_groups[gid]['size'] for gid in self.assignments[table_id] 
+                if gid in self.seated_groups
+            )
+            if current_occupancy + group_size > table_capacity:
+                return False, "Not enough space at table"
+
+        # Seat the group
+        self.assignments[table_id].append(group_id)
+        self.tables[table_id]['occupied'] = True
+        
+        # Move group from waiting to seated
+        self.seated_groups[group_id] = {
+            'size': group_size,
+            'name': group_name,
+            'table': table_id
+        }
+        del self.groups[group_id]
+
+        return True, "Group seated successfully"
+
+    def mark_group_left(self, group_id):
+        """Mark a group as having left the pub"""
+        if group_id in self.seated_groups:
+            table_id = self.seated_groups[group_id]['table']
+            
+            # Remove group from table assignments
+            if table_id in self.assignments and group_id in self.assignments[table_id]:
+                self.assignments[table_id].remove(group_id)
+                
+                # If no more groups at table, mark as unoccupied
+                if not self.assignments[table_id]:
+                    self.tables[table_id]['occupied'] = False
+                    
+                    # If this is a combined table, break it apart
+                    if '+' in table_id and table_id in self.combined_tables:
+                        component_tables = self.combined_tables[table_id]
+                        for comp_table in component_tables:
+                            if comp_table in self.tables:
+                                self.tables[comp_table]['occupied'] = False
+                                self.tables[comp_table]['combined'] = False
+                        # Remove the combined table
+                        del self.tables[table_id]
+                        del self.combined_tables[table_id]
+                        del self.assignments[table_id]
+            
+            # Remove group from seated groups
+            del self.seated_groups[group_id]
+            return True, f"Group marked as left"
+        else:
+            return False, "Group not found or not seated"
+
+    def find_best_table_for_group(self, group_size, group_id):
+        """Find the best table for a group, combining tables if necessary"""
+        # First try to find a single table that can accommodate the group
+        for table_id, table_info in self.tables.items():
+            # Skip combined tables and tables that are already part of a combination
+            if '+' in table_id or table_info.get('combined', False) or table_info['occupied']:
+                continue
+                
+            if group_size <= table_info['capacity']:
+                return table_id, False, None
+        
+        # If no single table found, try to combine tables in the same room
+        # Group empty tables by room
+        empty_tables_by_room = {}
+        for table_id, table_info in self.tables.items():
+            # Skip tables that are already part of a combined table
+            if '+' in table_id or table_info.get('combined', False) or table_info['occupied']:
+                continue
+                
+            room = table_info['room']
+            if room not in empty_tables_by_room:
+                empty_tables_by_room[room] = []
+            empty_tables_by_room[room].append((table_id, table_info['capacity']))
+        
+        # For each room, try to find a combination of tables that can accommodate the group
+        for room, empty_tables in empty_tables_by_room.items():
+            # Sort tables by capacity (largest first)
+            empty_tables.sort(key=lambda x: x[1], reverse=True)
+            
+            # Try to find a combination of tables that can accommodate the group
+            for i in range(len(empty_tables)):
+                current_sum = 0
+                combined_tables = []
+                
+                for j in range(i, len(empty_tables)):
+                    table_id, capacity = empty_tables[j]
+                    current_sum += capacity
+                    combined_tables.append(table_id)
+                    
+                    if current_sum >= group_size:
+                        # Mark these tables as combined and occupied
+                        for table_id in combined_tables:
+                            self.tables[table_id]['combined'] = True
+                            self.tables[table_id]['occupied'] = True
+                        
+                        # Create a virtual combined table
+                        combined_id = "+".join(combined_tables)
+                        combined_capacity = current_sum
+                        self.tables[combined_id] = {
+                            'capacity': combined_capacity,
+                            'occupied': True,
+                            'combined': True,
+                            'component_tables': combined_tables,
+                            'room': room
+                        }
+                        
+                        # Track the combined table
+                        self.combined_tables[combined_id] = combined_tables
+                        
+                        # Add the group to the combined table
+                        self.assignments[combined_id] = []
+                        
+                        return combined_id, True, combined_tables
+        
+        return None, False, None
+
+    def optimize_seating(self):
+        """Optimize the seating arrangement for maximum efficiency"""
+        # Create a copy of groups to avoid modification during iteration
+        groups_to_seat = list(self.groups.items())
+        
+        # Sort groups by size (descending) for most efficient packing
+        groups_to_seat.sort(key=lambda x: x[1]['size'], reverse=True)
+        
+        # Try to assign each group to a table
+        for group_id, group_data in groups_to_seat:
+            if group_id not in self.groups:  # Skip if already seated
+                continue
+                
+            group_size = group_data['size']
+            group_name = group_data['name']
+            
+            # Find the best table for this group
+            table_id, is_combined, combined_tables = self.find_best_table_for_group(group_size, group_id)
+            
+            if table_id:
+                # Seat the group at the table
+                self.assignments[table_id].append(group_id)
+                self.tables[table_id]['occupied'] = True
+                
+                # Move group from waiting to seated
+                self.seated_groups[group_id] = {
+                    'size': group_size,
+                    'name': group_name,
+                    'table': table_id
+                }
+                
+                # Remove group from waiting list
+                del self.groups[group_id]
+                
+                # Log if tables were combined
+                if is_combined:
+                    st.session_state.messages.append(f"Combined tables {combined_tables} in {self.tables[table_id]['room']} for {group_name}")
+
+    def get_table_utilization(self, table_id):
+        """Get utilization percentage for a table"""
+        if table_id not in self.tables:
+            return 0
+
+        capacity = self.tables[table_id]['capacity']
+        if capacity == 0:
+            return 0
+
+        # Calculate occupancy for all assigned groups
+        occupancy = sum(
+            self.seated_groups[gid]['size'] for gid in self.assignments[table_id] 
+            if gid in self.seated_groups
+        )
+        
+        return (occupancy / capacity) * 100 if capacity > 0 else 0
+
+    def get_overall_utilization(self):
+        """Get overall utilization percentage for all tables"""
+        total_capacity = sum(table['capacity'] for table in self.tables.values())
+        if total_capacity == 0:
+            return 0
+
+        total_occupancy = 0
+        for table_id in self.tables:
+            # Calculate occupancy for all assigned groups
+            total_occupancy += sum(
+                self.seated_groups[gid]['size'] for gid in self.assignments[table_id] 
+                if gid in self.seated_groups
+            )
+        
+        return (total_occupancy / total_capacity) * 100 if total_capacity > 0 else 0
+
+    def get_room_for_table(self, table_id):
+        """Get the room for a given table"""
+        for room, tables in self.rooms.items():
+            if table_id in tables:
+                return room
+        return "Unknown"
+
+    def get_table_status(self):
+        """Get status of all tables for display"""
+        table_status = []
+        for table_id in sorted(self.tables.keys()):
+            capacity = self.tables[table_id]['capacity']
+            room = self.tables[table_id].get('room', 'Unknown')
+            groups = self.assignments[table_id]
+            
+            # Calculate occupancy for all assigned groups
+            occupancy = 0
+            group_names = []
+            for group_id in groups:
+                if group_id in self.seated_groups:
+                    occupancy += self.seated_groups[group_id]['size']
+                    group_names.append(f"{self.seated_groups[group_id]['name']}({self.seated_groups[group_id]['size']})")
+            
+            utilization = self.get_table_utilization(table_id)
+            
+            # Add indicator for combined tables
+            table_type = " (Combined)" if '+' in table_id or self.tables[table_id].get('combined', False) else ""
+            
+            group_list = ", ".join(group_names)
+            status = f"Table {table_id}{table_type} ({room}, Capacity: {capacity}): {group_list} | Occupancy: {occupancy}/{capacity} ({utilization:.1f}%)"
+            table_status.append(status)
+        
+        return table_status
+    
+    def get_waiting_groups(self):
+        """Get waiting groups for display"""
+        waiting_groups = []
+        for group_id, group_data in self.groups.items():
+            waiting_groups.append(f"{group_data['name']}: {group_data['size']} people")
+        
+        return waiting_groups
+    
+    def rename_group(self, group_id, new_name):
+        """Rename a group"""
+        if group_id in self.groups:
+            self.groups[group_id]['name'] = new_name
+            return True
+        elif group_id in self.seated_groups:
+            self.seated_groups[group_id]['name'] = new_name
+            return True
+        return False
+    
+    def get_all_groups(self):
+        """Get all groups (both waiting and seated) for display"""
+        all_groups = []
+        
+        # Add waiting groups
+        for group_id, group_data in self.groups.items():
+            all_groups.append({
+                'id': group_id,
+                'name': group_data['name'],
+                'size': group_data['size'],
+                'status': 'Waiting',
+                'table': None
+            })
+        
+        # Add seated groups
+        for group_id, group_data in self.seated_groups.items():
+            all_groups.append({
+                'id': group_id,
+                'name': group_data['name'],
+                'size': group_data['size'],
+                'status': 'Seated',
+                'table': group_data['table']
+            })
+        
+        return all_groups
+
+
+# Initialize the table planner in session state
+if 'planner' not in st.session_state:
+    st.session_state.planner = TablePlanner()
+    
+    # Add default tables with room information
+    # GREENROOM
+    st.session_state.planner.add_table("T1A", 2, "GREENROOM")
+    st.session_state.planner.add_table("T1B", 2, "GREENROOM")
+    st.session_state.planner.add_table("T2", 4, "GREENROOM")
+    st.session_state.planner.add_table("T3A", 6, "GREENROOM")
+    st.session_state.planner.add_table("T3B", 4, "GREENROOM")
+
+    # RESTERAUNT
+    st.session_state.planner.add_table("T4", 4, "RESTERAUNT")
+    st.session_state.planner.add_table("T5", 4, "RESTERAUNT")
+    st.session_state.planner.add_table("T6", 4, "RESTERAUNT")
+    st.session_state.planner.add_table("T7", 4, "RESTERAUNT")
+    st.session_state.planner.add_table("T8", 4, "RESTERAUNT")
+    st.session_state.planner.add_table("T9A", 2, "RESTERAUNT")
+    st.session_state.planner.add_table("T9B", 2, "RESTERAUNT")
+
+    # BOTTOM BAR
+    st.session_state.planner.add_table("WINDOW", 6, "BOTTOM BAR")
+    st.session_state.planner.add_table("BACK RIGHT", 2, "BOTTOM BAR")
+    st.session_state.planner.add_table("LADS", 4, "BOTTOM BAR")
+    st.session_state.planner.add_table("BLACKBOARD", 4, "BOTTOM BAR")
+    
+    # SMALL FUNCTION ROOM
+    st.session_state.planner.add_table("SQUARE", 2, "SMALL FUNCTION")
+    st.session_state.planner.add_table("OVAL", 6, "SMALL FUNCTION")
+    st.session_state.planner.add_table("WOODEN", 8, "SMALL FUNCTION")
+
+# Streamlit app layout
+st.title("🍻 Pub Table Planner")
+st.markdown("---")
+
+# Initialize message log in session state
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+# Function to add messages to log
+def log_message(message):
+    st.session_state.messages.append(message)
+    if len(st.session_state.messages) > 10:  # Keep only the last 10 messages
+        st.session_state.messages.pop(0)
+
+# Create tabs for different functionalities
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dashboard", "Table Management", "Guest Management", "Manual Assignment", "Group Management"])
+
+with tab1:
+    st.header("Current Status")
+    
+    # Display overall utilization
+    utilization = st.session_state.planner.get_overall_utilization()
+    st.metric("Overall Utilization", f"{utilization:.1f}%")
+    
+    # Display table status
+    st.subheader("Table Status")
+    table_status = st.session_state.planner.get_table_status()
+    for status in table_status:
+        st.text(status)
+    
+    # Display waiting groups
+    st.subheader("Waiting Groups")
+    waiting_groups = st.session_state.planner.get_waiting_groups()
+    if waiting_groups:
+        for group in waiting_groups:
+            st.text(group)
+    else:
+        st.info("No groups waiting to be seated")
+    
+    # Optimize button
+    if st.button("Optimize Seating", use_container_width=True):
+        st.session_state.planner.optimize_seating()
+        log_message("Optimized seating arrangement for maximum efficiency")
+        st.rerun()
+
+with tab2:
+    st.header("Table Management")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Add Table")
+        table_id = st.text_input("Table ID", key="add_table_id")
+        capacity = st.number_input("Capacity", min_value=1, value=4, key="add_capacity")
+        room = st.selectbox("Room", options=["GREENROOM", "RESTERAUNT", "BOTTOM BAR", "SMALL FUNCTION"], key="add_room")
+        if st.button("Add Table"):
+            if table_id:
+                if table_id not in st.session_state.planner.tables:
+                    st.session_state.planner.add_table(table_id, capacity, room)
+                    log_message(f"Added table {table_id} with capacity {capacity} to {room}")
+                    st.rerun()
+                else:
+                    st.error(f"Table {table_id} already exists")
+            else:
+                st.error("Please provide a table ID")
+    
+    with col2:
+        st.subheader("Remove Table")
+        remove_table_id = st.selectbox(
+            "Select Table to Remove",
+            options=list(st.session_state.planner.tables.keys()),
+            key="remove_table_select"
+        )
+        if st.button("Remove Table", type="primary"):
+            if remove_table_id in st.session_state.planner.tables:
+                st.session_state.planner.remove_table(remove_table_id)
+                log_message(f"Removed table {remove_table_id}")
+                st.rerun()
+            else:
+                st.error(f"Table {remove_table_id} does not exist")
+
+with tab3:
+    st.header("Guest Management")
+    
+    st.subheader("Add Group")
+    group_name = st.text_input("Group Name (optional)", key="group_name")
+    group_size = st.number_input("Group Size", min_value=1, value=2, key="group_size")
+    if st.button("Add Group"):
+        group_id = st.session_state.planner.add_guests(group_size, group_name)
+        if group_name:
+            log_message(f"Added {group_name} with {group_size} people")
+        else:
+            log_message(f"Added group {group_id} with {group_size} people")
+        st.rerun()
+
+with tab4:
+    st.header("Manual Assignment")
+    
+    if st.session_state.planner.groups:
+        group_options = {
+            f"{group_data['name']} ({group_data['size']} people)": gid 
+            for gid, group_data in st.session_state.planner.groups.items()
+        }
+        selected_group_label = st.selectbox("Select Group", options=list(group_options.keys()))
+        selected_group_id = group_options[selected_group_label]
+    else:
+        st.info("No groups available for assignment")
+        selected_group_id = None
+    
+    # Only show regular tables (not combined ones) for manual assignment
+    table_options = [tid for tid in st.session_state.planner.tables.keys() if '+' not in tid and not st.session_state.planner.tables[tid].get('combined', False)]
+    selected_table = st.selectbox("Select Table", options=table_options)
+    
+    if st.button("Assign Group to Table") and selected_group_id is not None:
+        success, message = st.session_state.planner.seat_guests(selected_group_id, selected_table)
+        log_message(message)
+        st.rerun()
+
+with tab5:
+    st.header("Group Management")
+    
+    # Display all groups (both waiting and seated)
+    st.subheader("All Groups")
+    
+    # Get all groups
+    all_groups = st.session_state.planner.get_all_groups()
+    
+    if all_groups:
+        # Display groups in a table format
+        for group in all_groups:
+            col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
+            with col1:
+                st.text(group['name'])
+            with col2:
+                st.text(f"{group['size']} people")
+            with col3:
+                st.text(group['status'])
+            with col4:
+                if group['table']:
+                    st.text(f"Table {group['table']}")
+                else:
+                    st.text("")
+                
+            # Add action buttons for each group
+            col5, col6, col7 = st.columns([2, 2, 1])
+            with col5:
+                # Rename functionality
+                new_name = st.text_input("Rename", value=group['name'], key=f"rename_{group['id']}")
+            with col6:
+                if st.button("Rename", key=f"rename_btn_{group['id']}"):
+                    if st.session_state.planner.rename_group(group['id'], new_name):
+                        log_message(f"Renamed group to {new_name}")
+                        st.rerun()
+            with col7:
+                # Mark as left button for seated groups
+                if group['status'] == 'Seated':
+                    if st.button("Mark Left", key=f"left_{group['id']}"):
+                        success, message = st.session_state.planner.mark_group_left(group['id'])
+                        log_message(message)
+                        st.rerun()
+    else:
+        st.info("No groups yet")
+
+# Display message log
+st.markdown("---")
+st.subheader("Message Log")
+for message in st.session_state.messages:
+    st.text(message)
+
+# Add some styling
+st.markdown("""
+<style>
+    .stMetric {
+        background-color: #0e1117;
+        border: 1px solid #262730;
+        padding: 10px;
+        border-radius: 5px;
     }
-  },
-  "cells": [
-    {
-      "cell_type": "markdown",
-      "metadata": {
-        "id": "view-in-github",
-        "colab_type": "text"
-      },
-      "source": [
-        "<a href=\"https://colab.research.google.com/github/Adgeyman/ODIS/blob/main/ODIS.py\" target=\"_parent\"><img src=\"https://colab.research.google.com/assets/colab-badge.svg\" alt=\"Open In Colab\"/></a>"
-      ]
-    },
-    {
-      "cell_type": "code",
-      "execution_count": null,
-      "metadata": {
-        "id": "XwwTAAtL4ts1"
-      },
-      "outputs": [],
-      "source": [
-        "import streamlit as st\n",
-        "\n",
-        "from collections import defaultdict\n",
-        "\n",
-        "class TablePlanner:\n",
-        "    def __init__(self):\n",
-        "        # Tables: {table_id: {'capacity': capacity, 'occupied': bool, 'room': room_name}}\n",
-        "        self.tables = {}\n",
-        "        # Current assignments: {table_id: [group_ids]}\n",
-        "        self.assignments = defaultdict(list)\n",
-        "        # Guest groups waiting to be seated: {group_id: {'size': size, 'name': name}}\n",
-        "        self.groups = {}\n",
-        "        # Seated groups: {group_id: {'size': size, 'name': name, 'table': table_id}}\n",
-        "        self.seated_groups = {}\n",
-        "        # Counter for group IDs\n",
-        "        self.next_group_id = 1\n",
-        "        # Combined tables tracking\n",
-        "        self.combined_tables = {}\n",
-        "        # Room definitions\n",
-        "        self.rooms = {\n",
-        "            \"GREENROOM\": [\"T1A\", \"T1B\", \"T2\", \"T3A\", \"T3B\"],\n",
-        "            \"RESTERAUNT\": [\"T4\", \"T5\", \"T6\", \"T7\", \"T8\", \"T9A\", \"T9B\"],\n",
-        "            \"BOTTOM BAR\": [\"WINDOW\", \"BACK RIGHT\", \"LADS\", \"BLACKBOARD\"],\n",
-        "            \"SMALL FUNCTION\": [\"SQUARE\", \"OVAL\", \"WOODEN\"]\n",
-        "        }\n",
-        "\n",
-        "    def add_table(self, table_id, capacity, room):\n",
-        "        \"\"\"Add a new table to the pub\"\"\"\n",
-        "        self.tables[table_id] = {'capacity': capacity, 'occupied': False, 'combined': False, 'room': room}\n",
-        "\n",
-        "    def remove_table(self, table_id):\n",
-        "        \"\"\"Remove a table from the pub\"\"\"\n",
-        "        if table_id in self.tables:\n",
-        "            del self.tables[table_id]\n",
-        "            if table_id in self.assignments:\n",
-        "                # Move any assigned groups back to waiting\n",
-        "                for group_id in self.assignments[table_id]:\n",
-        "                    if group_id in self.seated_groups:\n",
-        "                        # Move seated group back to waiting\n",
-        "                        group_data = self.seated_groups[group_id]\n",
-        "                        self.groups[group_id] = {'size': group_data['size'], 'name': group_data['name']}\n",
-        "                        del self.seated_groups[group_id]\n",
-        "                del self.assignments[table_id]\n",
-        "\n",
-        "    def add_guests(self, group_size, group_name=None):\n",
-        "        \"\"\"Add a new group of guests\"\"\"\n",
-        "        group_id = self.next_group_id\n",
-        "        self.next_group_id += 1\n",
-        "\n",
-        "        # If no name provided, use the ID\n",
-        "        if not group_name:\n",
-        "            group_name = f\"Group {group_id}\"\n",
-        "\n",
-        "        self.groups[group_id] = {'size': group_size, 'name': group_name}\n",
-        "        return group_id\n",
-        "\n",
-        "    def seat_guests(self, group_id, table_id):\n",
-        "        \"\"\"Seat a specific group at a specific table\"\"\"\n",
-        "        if table_id not in self.tables:\n",
-        "            return False, \"Table does not exist\"\n",
-        "\n",
-        "        if group_id not in self.groups:\n",
-        "            return False, \"Group does not exist\"\n",
-        "\n",
-        "        group_size = self.groups[group_id]['size']\n",
-        "        group_name = self.groups[group_id]['name']\n",
-        "        table_info = self.tables[table_id]\n",
-        "\n",
-        "        # Check if table is part of a combined table\n",
-        "        if table_info.get('combined', False) and '+' in table_id:\n",
-        "            # This is a combined table, use its capacity\n",
-        "            table_capacity = table_info['capacity']\n",
-        "        else:\n",
-        "            # Regular table\n",
-        "            table_capacity = table_info['capacity']\n",
-        "\n",
-        "        if group_size > table_capacity:\n",
-        "            return False, \"Group too large for table\"\n",
-        "\n",
-        "        # Check if table is already occupied\n",
-        "        if self.tables[table_id]['occupied']:\n",
-        "            # Check if there's enough remaining capacity\n",
-        "            current_occupancy = sum(\n",
-        "                self.seated_groups[gid]['size'] for gid in self.assignments[table_id]\n",
-        "                if gid in self.seated_groups\n",
-        "            )\n",
-        "            if current_occupancy + group_size > table_capacity:\n",
-        "                return False, \"Not enough space at table\"\n",
-        "\n",
-        "        # Seat the group\n",
-        "        self.assignments[table_id].append(group_id)\n",
-        "        self.tables[table_id]['occupied'] = True\n",
-        "\n",
-        "        # Move group from waiting to seated\n",
-        "        self.seated_groups[group_id] = {\n",
-        "            'size': group_size,\n",
-        "            'name': group_name,\n",
-        "            'table': table_id\n",
-        "        }\n",
-        "        del self.groups[group_id]\n",
-        "\n",
-        "        return True, \"Group seated successfully\"\n",
-        "\n",
-        "    def mark_group_left(self, group_id):\n",
-        "        \"\"\"Mark a group as having left the pub\"\"\"\n",
-        "        if group_id in self.seated_groups:\n",
-        "            table_id = self.seated_groups[group_id]['table']\n",
-        "\n",
-        "            # Remove group from table assignments\n",
-        "            if table_id in self.assignments and group_id in self.assignments[table_id]:\n",
-        "                self.assignments[table_id].remove(group_id)\n",
-        "\n",
-        "                # If no more groups at table, mark as unoccupied\n",
-        "                if not self.assignments[table_id]:\n",
-        "                    self.tables[table_id]['occupied'] = False\n",
-        "\n",
-        "                    # If this is a combined table, break it apart\n",
-        "                    if '+' in table_id and table_id in self.combined_tables:\n",
-        "                        component_tables = self.combined_tables[table_id]\n",
-        "                        for comp_table in component_tables:\n",
-        "                            if comp_table in self.tables:\n",
-        "                                self.tables[comp_table]['occupied'] = False\n",
-        "                                self.tables[comp_table]['combined'] = False\n",
-        "                        # Remove the combined table\n",
-        "                        del self.tables[table_id]\n",
-        "                        del self.combined_tables[table_id]\n",
-        "                        del self.assignments[table_id]\n",
-        "\n",
-        "            # Remove group from seated groups\n",
-        "            del self.seated_groups[group_id]\n",
-        "            return True, f\"Group marked as left\"\n",
-        "        else:\n",
-        "            return False, \"Group not found or not seated\"\n",
-        "\n",
-        "    def find_best_table_for_group(self, group_size, group_id):\n",
-        "        \"\"\"Find the best table for a group, combining tables if necessary\"\"\"\n",
-        "        # First try to find a single table that can accommodate the group\n",
-        "        for table_id, table_info in self.tables.items():\n",
-        "            # Skip combined tables and tables that are already part of a combination\n",
-        "            if '+' in table_id or table_info.get('combined', False) or table_info['occupied']:\n",
-        "                continue\n",
-        "\n",
-        "            if group_size <= table_info['capacity']:\n",
-        "                return table_id, False, None\n",
-        "\n",
-        "        # If no single table found, try to combine tables in the same room\n",
-        "        # Group empty tables by room\n",
-        "        empty_tables_by_room = {}\n",
-        "        for table_id, table_info in self.tables.items():\n",
-        "            # Skip tables that are already part of a combined table\n",
-        "            if '+' in table_id or table_info.get('combined', False) or table_info['occupied']:\n",
-        "                continue\n",
-        "\n",
-        "            room = table_info['room']\n",
-        "            if room not in empty_tables_by_room:\n",
-        "                empty_tables_by_room[room] = []\n",
-        "            empty_tables_by_room[room].append((table_id, table_info['capacity']))\n",
-        "\n",
-        "        # For each room, try to find a combination of tables that can accommodate the group\n",
-        "        for room, empty_tables in empty_tables_by_room.items():\n",
-        "            # Sort tables by capacity (largest first)\n",
-        "            empty_tables.sort(key=lambda x: x[1], reverse=True)\n",
-        "\n",
-        "            # Try to find a combination of tables that can accommodate the group\n",
-        "            for i in range(len(empty_tables)):\n",
-        "                current_sum = 0\n",
-        "                combined_tables = []\n",
-        "\n",
-        "                for j in range(i, len(empty_tables)):\n",
-        "                    table_id, capacity = empty_tables[j]\n",
-        "                    current_sum += capacity\n",
-        "                    combined_tables.append(table_id)\n",
-        "\n",
-        "                    if current_sum >= group_size:\n",
-        "                        # Mark these tables as combined and occupied\n",
-        "                        for table_id in combined_tables:\n",
-        "                            self.tables[table_id]['combined'] = True\n",
-        "                            self.tables[table_id]['occupied'] = True\n",
-        "\n",
-        "                        # Create a virtual combined table\n",
-        "                        combined_id = \"+\".join(combined_tables)\n",
-        "                        combined_capacity = current_sum\n",
-        "                        self.tables[combined_id] = {\n",
-        "                            'capacity': combined_capacity,\n",
-        "                            'occupied': True,\n",
-        "                            'combined': True,\n",
-        "                            'component_tables': combined_tables,\n",
-        "                            'room': room\n",
-        "                        }\n",
-        "\n",
-        "                        # Track the combined table\n",
-        "                        self.combined_tables[combined_id] = combined_tables\n",
-        "\n",
-        "                        # Add the group to the combined table\n",
-        "                        self.assignments[combined_id] = []\n",
-        "\n",
-        "                        return combined_id, True, combined_tables\n",
-        "\n",
-        "        return None, False, None\n",
-        "\n",
-        "    def optimize_seating(self):\n",
-        "        \"\"\"Optimize the seating arrangement for maximum efficiency\"\"\"\n",
-        "        # Create a copy of groups to avoid modification during iteration\n",
-        "        groups_to_seat = list(self.groups.items())\n",
-        "\n",
-        "        # Sort groups by size (descending) for most efficient packing\n",
-        "        groups_to_seat.sort(key=lambda x: x[1]['size'], reverse=True)\n",
-        "\n",
-        "        # Try to assign each group to a table\n",
-        "        for group_id, group_data in groups_to_seat:\n",
-        "            if group_id not in self.groups:  # Skip if already seated\n",
-        "                continue\n",
-        "\n",
-        "            group_size = group_data['size']\n",
-        "            group_name = group_data['name']\n",
-        "\n",
-        "            # Find the best table for this group\n",
-        "            table_id, is_combined, combined_tables = self.find_best_table_for_group(group_size, group_id)\n",
-        "\n",
-        "            if table_id:\n",
-        "                # Seat the group at the table\n",
-        "                self.assignments[table_id].append(group_id)\n",
-        "                self.tables[table_id]['occupied'] = True\n",
-        "\n",
-        "                # Move group from waiting to seated\n",
-        "                self.seated_groups[group_id] = {\n",
-        "                    'size': group_size,\n",
-        "                    'name': group_name,\n",
-        "                    'table': table_id\n",
-        "                }\n",
-        "\n",
-        "                # Remove group from waiting list\n",
-        "                del self.groups[group_id]\n",
-        "\n",
-        "                # Log if tables were combined\n",
-        "                if is_combined:\n",
-        "                    st.session_state.messages.append(f\"Combined tables {combined_tables} in {self.tables[table_id]['room']} for {group_name}\")\n",
-        "\n",
-        "    def get_table_utilization(self, table_id):\n",
-        "        \"\"\"Get utilization percentage for a table\"\"\"\n",
-        "        if table_id not in self.tables:\n",
-        "            return 0\n",
-        "\n",
-        "        capacity = self.tables[table_id]['capacity']\n",
-        "        if capacity == 0:\n",
-        "            return 0\n",
-        "\n",
-        "        # Calculate occupancy for all assigned groups\n",
-        "        occupancy = sum(\n",
-        "            self.seated_groups[gid]['size'] for gid in self.assignments[table_id]\n",
-        "            if gid in self.seated_groups\n",
-        "        )\n",
-        "\n",
-        "        return (occupancy / capacity) * 100 if capacity > 0 else 0\n",
-        "\n",
-        "    def get_overall_utilization(self):\n",
-        "        \"\"\"Get overall utilization percentage for all tables\"\"\"\n",
-        "        total_capacity = sum(table['capacity'] for table in self.tables.values())\n",
-        "        if total_capacity == 0:\n",
-        "            return 0\n",
-        "\n",
-        "        total_occupancy = 0\n",
-        "        for table_id in self.tables:\n",
-        "            # Calculate occupancy for all assigned groups\n",
-        "            total_occupancy += sum(\n",
-        "                self.seated_groups[gid]['size'] for gid in self.assignments[table_id]\n",
-        "                if gid in self.seated_groups\n",
-        "            )\n",
-        "\n",
-        "        return (total_occupancy / total_capacity) * 100 if total_capacity > 0 else 0\n",
-        "\n",
-        "    def get_room_for_table(self, table_id):\n",
-        "        \"\"\"Get the room for a given table\"\"\"\n",
-        "        for room, tables in self.rooms.items():\n",
-        "            if table_id in tables:\n",
-        "                return room\n",
-        "        return \"Unknown\"\n",
-        "\n",
-        "    def get_table_status(self):\n",
-        "        \"\"\"Get status of all tables for display\"\"\"\n",
-        "        table_status = []\n",
-        "        for table_id in sorted(self.tables.keys()):\n",
-        "            capacity = self.tables[table_id]['capacity']\n",
-        "            room = self.tables[table_id].get('room', 'Unknown')\n",
-        "            groups = self.assignments[table_id]\n",
-        "\n",
-        "            # Calculate occupancy for all assigned groups\n",
-        "            occupancy = 0\n",
-        "            group_names = []\n",
-        "            for group_id in groups:\n",
-        "                if group_id in self.seated_groups:\n",
-        "                    occupancy += self.seated_groups[group_id]['size']\n",
-        "                    group_names.append(f\"{self.seated_groups[group_id]['name']}({self.seated_groups[group_id]['size']})\")\n",
-        "\n",
-        "            utilization = self.get_table_utilization(table_id)\n",
-        "\n",
-        "            # Add indicator for combined tables\n",
-        "            table_type = \" (Combined)\" if '+' in table_id or self.tables[table_id].get('combined', False) else \"\"\n",
-        "\n",
-        "            group_list = \", \".join(group_names)\n",
-        "            status = f\"Table {table_id}{table_type} ({room}, Capacity: {capacity}): {group_list} | Occupancy: {occupancy}/{capacity} ({utilization:.1f}%)\"\n",
-        "            table_status.append(status)\n",
-        "\n",
-        "        return table_status\n",
-        "\n",
-        "    def get_waiting_groups(self):\n",
-        "        \"\"\"Get waiting groups for display\"\"\"\n",
-        "        waiting_groups = []\n",
-        "        for group_id, group_data in self.groups.items():\n",
-        "            waiting_groups.append(f\"{group_data['name']}: {group_data['size']} people\")\n",
-        "\n",
-        "        return waiting_groups\n",
-        "\n",
-        "    def rename_group(self, group_id, new_name):\n",
-        "        \"\"\"Rename a group\"\"\"\n",
-        "        if group_id in self.groups:\n",
-        "            self.groups[group_id]['name'] = new_name\n",
-        "            return True\n",
-        "        elif group_id in self.seated_groups:\n",
-        "            self.seated_groups[group_id]['name'] = new_name\n",
-        "            return True\n",
-        "        return False\n",
-        "\n",
-        "    def get_all_groups(self):\n",
-        "        \"\"\"Get all groups (both waiting and seated) for display\"\"\"\n",
-        "        all_groups = []\n",
-        "\n",
-        "        # Add waiting groups\n",
-        "        for group_id, group_data in self.groups.items():\n",
-        "            all_groups.append({\n",
-        "                'id': group_id,\n",
-        "                'name': group_data['name'],\n",
-        "                'size': group_data['size'],\n",
-        "                'status': 'Waiting',\n",
-        "                'table': None\n",
-        "            })\n",
-        "\n",
-        "        # Add seated groups\n",
-        "        for group_id, group_data in self.seated_groups.items():\n",
-        "            all_groups.append({\n",
-        "                'id': group_id,\n",
-        "                'name': group_data['name'],\n",
-        "                'size': group_data['size'],\n",
-        "                'status': 'Seated',\n",
-        "                'table': group_data['table']\n",
-        "            })\n",
-        "\n",
-        "        return all_groups\n",
-        "\n",
-        "\n",
-        "# Initialize the table planner in session state\n",
-        "if 'planner' not in st.session_state:\n",
-        "    st.session_state.planner = TablePlanner()\n",
-        "\n",
-        "    # Add default tables with room information\n",
-        "    # GREENROOM\n",
-        "    st.session_state.planner.add_table(\"T1A\", 2, \"GREENROOM\")\n",
-        "    st.session_state.planner.add_table(\"T1B\", 2, \"GREENROOM\")\n",
-        "    st.session_state.planner.add_table(\"T2\", 4, \"GREENROOM\")\n",
-        "    st.session_state.planner.add_table(\"T3A\", 6, \"GREENROOM\")\n",
-        "    st.session_state.planner.add_table(\"T3B\", 4, \"GREENROOM\")\n",
-        "\n",
-        "    # RESTERAUNT\n",
-        "    st.session_state.planner.add_table(\"T4\", 4, \"RESTERAUNT\")\n",
-        "    st.session_state.planner.add_table(\"T5\", 4, \"RESTERAUNT\")\n",
-        "    st.session_state.planner.add_table(\"T6\", 4, \"RESTERAUNT\")\n",
-        "    st.session_state.planner.add_table(\"T7\", 4, \"RESTERAUNT\")\n",
-        "    st.session_state.planner.add_table(\"T8\", 4, \"RESTERAUNT\")\n",
-        "    st.session_state.planner.add_table(\"T9A\", 2, \"RESTERAUNT\")\n",
-        "    st.session_state.planner.add_table(\"T9B\", 2, \"RESTERAUNT\")\n",
-        "\n",
-        "    # BOTTOM BAR\n",
-        "    st.session_state.planner.add_table(\"WINDOW\", 6, \"BOTTOM BAR\")\n",
-        "    st.session_state.planner.add_table(\"BACK RIGHT\", 2, \"BOTTOM BAR\")\n",
-        "    st.session_state.planner.add_table(\"LADS\", 4, \"BOTTOM BAR\")\n",
-        "    st.session_state.planner.add_table(\"BLACKBOARD\", 4, \"BOTTOM BAR\")\n",
-        "\n",
-        "    # SMALL FUNCTION ROOM\n",
-        "    st.session_state.planner.add_table(\"SQUARE\", 2, \"SMALL FUNCTION\")\n",
-        "    st.session_state.planner.add_table(\"OVAL\", 6, \"SMALL FUNCTION\")\n",
-        "    st.session_state.planner.add_table(\"WOODEN\", 8, \"SMALL FUNCTION\")\n",
-        "\n",
-        "# Streamlit app layout\n",
-        "st.title(\"🍻 Pub Table Planner\")\n",
-        "st.markdown(\"---\")\n",
-        "\n",
-        "# Initialize message log in session state\n",
-        "if 'messages' not in st.session_state:\n",
-        "    st.session_state.messages = []\n",
-        "\n",
-        "# Function to add messages to log\n",
-        "def log_message(message):\n",
-        "    st.session_state.messages.append(message)\n",
-        "    if len(st.session_state.messages) > 10:  # Keep only the last 10 messages\n",
-        "        st.session_state.messages.pop(0)\n",
-        "\n",
-        "# Create tabs for different functionalities\n",
-        "tab1, tab2, tab3, tab4, tab5 = st.tabs([\"Dashboard\", \"Table Management\", \"Guest Management\", \"Manual Assignment\", \"Group Management\"])\n",
-        "\n",
-        "with tab1:\n",
-        "    st.header(\"Current Status\")\n",
-        "\n",
-        "    # Display overall utilization\n",
-        "    utilization = st.session_state.planner.get_overall_utilization()\n",
-        "    st.metric(\"Overall Utilization\", f\"{utilization:.1f}%\")\n",
-        "\n",
-        "    # Display table status\n",
-        "    st.subheader(\"Table Status\")\n",
-        "    table_status = st.session_state.planner.get_table_status()\n",
-        "    for status in table_status:\n",
-        "        st.text(status)\n",
-        "\n",
-        "    # Display waiting groups\n",
-        "    st.subheader(\"Waiting Groups\")\n",
-        "    waiting_groups = st.session_state.planner.get_waiting_groups()\n",
-        "    if waiting_groups:\n",
-        "        for group in waiting_groups:\n",
-        "            st.text(group)\n",
-        "    else:\n",
-        "        st.info(\"No groups waiting to be seated\")\n",
-        "\n",
-        "    # Optimize button\n",
-        "    if st.button(\"Optimize Seating\", use_container_width=True):\n",
-        "        st.session_state.planner.optimize_seating()\n",
-        "        log_message(\"Optimized seating arrangement for maximum efficiency\")\n",
-        "        st.rerun()\n",
-        "\n",
-        "with tab2:\n",
-        "    st.header(\"Table Management\")\n",
-        "\n",
-        "    col1, col2 = st.columns(2)\n",
-        "\n",
-        "    with col1:\n",
-        "        st.subheader(\"Add Table\")\n",
-        "        table_id = st.text_input(\"Table ID\", key=\"add_table_id\")\n",
-        "        capacity = st.number_input(\"Capacity\", min_value=1, value=4, key=\"add_capacity\")\n",
-        "        room = st.selectbox(\"Room\", options=[\"GREENROOM\", \"RESTERAUNT\", \"BOTTOM BAR\", \"SMALL FUNCTION\"], key=\"add_room\")\n",
-        "        if st.button(\"Add Table\"):\n",
-        "            if table_id:\n",
-        "                if table_id not in st.session_state.planner.tables:\n",
-        "                    st.session_state.planner.add_table(table_id, capacity, room)\n",
-        "                    log_message(f\"Added table {table_id} with capacity {capacity} to {room}\")\n",
-        "                    st.rerun()\n",
-        "                else:\n",
-        "                    st.error(f\"Table {table_id} already exists\")\n",
-        "            else:\n",
-        "                st.error(\"Please provide a table ID\")\n",
-        "\n",
-        "    with col2:\n",
-        "        st.subheader(\"Remove Table\")\n",
-        "        remove_table_id = st.selectbox(\n",
-        "            \"Select Table to Remove\",\n",
-        "            options=list(st.session_state.planner.tables.keys()),\n",
-        "            key=\"remove_table_select\"\n",
-        "        )\n",
-        "        if st.button(\"Remove Table\", type=\"primary\"):\n",
-        "            if remove_table_id in st.session_state.planner.tables:\n",
-        "                st.session_state.planner.remove_table(remove_table_id)\n",
-        "                log_message(f\"Removed table {remove_table_id}\")\n",
-        "                st.rerun()\n",
-        "            else:\n",
-        "                st.error(f\"Table {remove_table_id} does not exist\")\n",
-        "\n",
-        "with tab3:\n",
-        "    st.header(\"Guest Management\")\n",
-        "\n",
-        "    st.subheader(\"Add Group\")\n",
-        "    group_name = st.text_input(\"Group Name (optional)\", key=\"group_name\")\n",
-        "    group_size = st.number_input(\"Group Size\", min_value=1, value=2, key=\"group_size\")\n",
-        "    if st.button(\"Add Group\"):\n",
-        "        group_id = st.session_state.planner.add_guests(group_size, group_name)\n",
-        "        if group_name:\n",
-        "            log_message(f\"Added {group_name} with {group_size} people\")\n",
-        "        else:\n",
-        "            log_message(f\"Added group {group_id} with {group_size} people\")\n",
-        "        st.rerun()\n",
-        "\n",
-        "with tab4:\n",
-        "    st.header(\"Manual Assignment\")\n",
-        "\n",
-        "    if st.session_state.planner.groups:\n",
-        "        group_options = {\n",
-        "            f\"{group_data['name']} ({group_data['size']} people)\": gid\n",
-        "            for gid, group_data in st.session_state.planner.groups.items()\n",
-        "        }\n",
-        "        selected_group_label = st.selectbox(\"Select Group\", options=list(group_options.keys()))\n",
-        "        selected_group_id = group_options[selected_group_label]\n",
-        "    else:\n",
-        "        st.info(\"No groups available for assignment\")\n",
-        "        selected_group_id = None\n",
-        "\n",
-        "    # Only show regular tables (not combined ones) for manual assignment\n",
-        "    table_options = [tid for tid in st.session_state.planner.tables.keys() if '+' not in tid and not st.session_state.planner.tables[tid].get('combined', False)]\n",
-        "    selected_table = st.selectbox(\"Select Table\", options=table_options)\n",
-        "\n",
-        "    if st.button(\"Assign Group to Table\") and selected_group_id is not None:\n",
-        "        success, message = st.session_state.planner.seat_guests(selected_group_id, selected_table)\n",
-        "        log_message(message)\n",
-        "        st.rerun()\n",
-        "\n",
-        "with tab5:\n",
-        "    st.header(\"Group Management\")\n",
-        "\n",
-        "    # Display all groups (both waiting and seated)\n",
-        "    st.subheader(\"All Groups\")\n",
-        "\n",
-        "    # Get all groups\n",
-        "    all_groups = st.session_state.planner.get_all_groups()\n",
-        "\n",
-        "    if all_groups:\n",
-        "        # Display groups in a table format\n",
-        "        for group in all_groups:\n",
-        "            col1, col2, col3, col4 = st.columns([3, 2, 2, 2])\n",
-        "            with col1:\n",
-        "                st.text(group['name'])\n",
-        "            with col2:\n",
-        "                st.text(f\"{group['size']} people\")\n",
-        "            with col3:\n",
-        "                st.text(group['status'])\n",
-        "            with col4:\n",
-        "                if group['table']:\n",
-        "                    st.text(f\"Table {group['table']}\")\n",
-        "                else:\n",
-        "                    st.text(\"\")\n",
-        "\n",
-        "            # Add action buttons for each group\n",
-        "            col5, col6, col7 = st.columns([2, 2, 1])\n",
-        "            with col5:\n",
-        "                # Rename functionality\n",
-        "                new_name = st.text_input(\"Rename\", value=group['name'], key=f\"rename_{group['id']}\")\n",
-        "            with col6:\n",
-        "                if st.button(\"Rename\", key=f\"rename_btn_{group['id']}\"):\n",
-        "                    if st.session_state.planner.rename_group(group['id'], new_name):\n",
-        "                        log_message(f\"Renamed group to {new_name}\")\n",
-        "                        st.rerun()\n",
-        "            with col7:\n",
-        "                # Mark as left button for seated groups\n",
-        "                if group['status'] == 'Seated':\n",
-        "                    if st.button(\"Mark Left\", key=f\"left_{group['id']}\"):\n",
-        "                        success, message = st.session_state.planner.mark_group_left(group['id'])\n",
-        "                        log_message(message)\n",
-        "                        st.rerun()\n",
-        "    else:\n",
-        "        st.info(\"No groups yet\")\n",
-        "\n",
-        "# Display message log\n",
-        "st.markdown(\"---\")\n",
-        "st.subheader(\"Message Log\")\n",
-        "for message in st.session_state.messages:\n",
-        "    st.text(message)\n",
-        "\n",
-        "# Add some styling\n",
-        "st.markdown(\"\"\"\n",
-        "<style>\n",
-        "    .stMetric {\n",
-        "        background-color: #0e1117;\n",
-        "        border: 1px solid #262730;\n",
-        "        padding: 10px;\n",
-        "        border-radius: 5px;\n",
-        "    }\n",
-        "    div[data-testid=\"stExpander\"] div[role=\"button\"] p {\n",
-        "        font-size: 14px;\n",
-        "    }\n",
-        "</style>\n",
-        "\"\"\", unsafe_allow_html=True)"
-      ]
+    div[data-testid="stExpander"] div[role="button"] p {
+        font-size: 14px;
     }
-  ]
-}
+</style>
+""", unsafe_allow_html=True)

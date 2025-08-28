@@ -18,7 +18,7 @@ class TablePlanner:
         # Room definitions
         self.rooms = {
             "GREENROOM": ["T1A", "T1B", "T2", "T3A", "T3B"],
-            "RESTERAUNT": ["T4", "T5", "T6", "T7", "T8", "T9A", "T9B"],
+            "RESTAURANT": ["T4", "T5", "T6", "T7", "T8", "T9A", "T9B"],
             "BOTTOM BAR": ["WINDOW", "BACK RIGHT", "LADS", "BLACKBOARD"],
             "SMALL FUNCTION": ["SQUARE", "OVAL", "WOODEN"]
         }
@@ -359,14 +359,14 @@ if 'planner' not in st.session_state:
     st.session_state.planner.add_table("T3A", 6, "GREENROOM")
     st.session_state.planner.add_table("T3B", 4, "GREENROOM")
 
-    # RESTERAUNT
-    st.session_state.planner.add_table("T4", 4, "RESTERAUNT")
-    st.session_state.planner.add_table("T5", 4, "RESTERAUNT")
-    st.session_state.planner.add_table("T6", 4, "RESTERAUNT")
-    st.session_state.planner.add_table("T7", 4, "RESTERAUNT")
-    st.session_state.planner.add_table("T8", 4, "RESTERAUNT")
-    st.session_state.planner.add_table("T9A", 2, "RESTERAUNT")
-    st.session_state.planner.add_table("T9B", 2, "RESTERAUNT")
+    # RESTAURANT
+    st.session_state.planner.add_table("T4", 4, "RESTAURANT")
+    st.session_state.planner.add_table("T5", 4, "RESTEAUANT")
+    st.session_state.planner.add_table("T6", 4, "RESTAURANT")
+    st.session_state.planner.add_table("T7", 4, "RESTAURANT")
+    st.session_state.planner.add_table("T8", 4, "RESTAURANT")
+    st.session_state.planner.add_table("T9A", 2, "RESTAURANT")
+    st.session_state.planner.add_table("T9B", 2, "RESTAURANT")
 
     # BOTTOM BAR
     st.session_state.planner.add_table("WINDOW", 6, "BOTTOM BAR")
@@ -433,7 +433,7 @@ with tab2:
         st.subheader("Add Table")
         table_id = st.text_input("Table ID", key="add_table_id")
         capacity = st.number_input("Capacity", min_value=1, value=4, key="add_capacity")
-        room = st.selectbox("Room", options=["GREENROOM", "RESTERAUNT", "BOTTOM BAR", "SMALL FUNCTION"], key="add_room")
+        room = st.selectbox("Room", options=["GREENROOM", "RESTAURANT", "BOTTOM BAR", "SMALL FUNCTION"], key="add_room")
         if st.button("Add Table"):
             if table_id:
                 if table_id not in st.session_state.planner.tables:
